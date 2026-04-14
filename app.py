@@ -154,7 +154,7 @@ def generar_excel():
         return send_file(buf,
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             as_attachment=True,
-            download_name=f'Presupuesto_{pat}.xlsx')
+            download_name=f'{pat}GAMA.xlsx')
 
     except Exception as e:
         import traceback; traceback.print_exc()
