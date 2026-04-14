@@ -11,43 +11,47 @@ MESES = ['enero','febrero','marzo','abril','mayo','junio','julio',
          'agosto','septiembre','octubre','noviembre','diciembre']
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'plantilla.xlsx')
 
-# Style indices from original template
-S_TEXT='31'; S_TEXT2='51'; S_NUM='15'; S_NUM2='40'; S_FRAC='23'
-S_HEAD='1';  S_DATA='38';  S_PRICE='32'
-
 # Section header rows — must NEVER be cleared
-# B17=Desabollar-Reparar(46), B39=Pintar(60), B48=Desmontar y montar(57), B56=Repuestos(57)
 HEADER_ROWS = {17, 39, 48, 56}
-
-# Repair rows: 18-38 (under Desabollar), 40-47 (under Pintar), 49-55 (under Desmontar)
 REPAIR_ROWS = list(range(18, 39)) + list(range(40, 48)) + list(range(49, 56))
-# Parts rows: 57-106
-PARTS_ROWS = list(range(57, 107))
+PARTS_ROWS  = list(range(57, 107))
+
+def get_cell_style(xml, ref):
+    """Get the original style index of a cell without changing it."""
+    p = rf'<c r="{re.escape(ref)}"[^>]*(?:/>|>.*?</c>)'
+    m = re.search(p, xml, re.DOTALL)
+    if m:
+        sm = re.search(r's="(\d+)"', m.group(0))
+        return sm.group(1) if sm else '0'
+    return '0'
+
+def clear_cell_preserve_style(xml, ref):
+    """Remove cell value but keep original style — preserves all borders/formatting."""
+    original_style = get_cell_style(xml, ref)
+    empty = f'<c r="{ref}" s="{original_style}"/>'
+    # Match self-closing: <c r="X" ... />
+    p1 = rf'<c r="{re.escape(ref)}"(?:\s[^>]*)?\s*/>'
+    # Match with content: <c r="X" ...>...</c>
+    p2 = rf'<c r="{re.escape(ref)}"[^>]*>.*?</c>'
+    result = re.sub(p1, empty, xml)
+    if result != xml:
+        return result
+    return re.sub(p2, empty, xml, flags=re.DOTALL)
+
+def set_cell_value(xml, ref, new_cell):
+    """Replace any cell form (empty or with value) with new_cell."""
+    p1 = rf'<c r="{re.escape(ref)}"(?:\s[^>]*)?\s*/>'
+    p2 = rf'<c r="{re.escape(ref)}"[^>]*>.*?</c>'
+    result = re.sub(p1, new_cell, xml)
+    if result != xml:
+        return result
+    return re.sub(p2, new_cell, xml, flags=re.DOTALL)
 
 def make_text_cell(ref, style, idx):
     return f'<c r="{ref}" s="{style}" t="s"><v>{idx}</v></c>'
 
 def make_num_cell(ref, style, value):
     return f'<c r="{ref}" s="{style}"><v>{value}</v></c>'
-
-def replace_cell(xml, ref, new_cell):
-    p1 = rf'<c r="{re.escape(ref)}"[^/]*/>'
-    p2 = rf'<c r="{re.escape(ref)}"[^>]*>.*?</c>'
-    if re.search(p1, xml):
-        return re.sub(p1, new_cell, xml)
-    if re.search(p2, xml, re.DOTALL):
-        return re.sub(p2, new_cell, xml, flags=re.DOTALL)
-    return xml
-
-def clear_cell(xml, ref, style):
-    empty = f'<c r="{ref}" s="{style}"/>'
-    p1 = rf'<c r="{re.escape(ref)}"[^/]*/>'
-    p2 = rf'<c r="{re.escape(ref)}"[^>]*>.*?</c>'
-    if re.search(p1, xml):
-        return re.sub(p1, empty, xml)
-    if re.search(p2, xml, re.DOTALL):
-        return re.sub(p2, empty, xml, flags=re.DOTALL)
-    return xml
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -65,9 +69,9 @@ def generar_excel():
         shared_xml = all_files['xl/sharedStrings.xml'].decode('utf-8')
 
         # Parse shared strings
-        ss_items = re.findall(r'<si>.*?</si>', shared_xml, re.DOTALL)
+        ss_raw = re.findall(r'<si>.*?</si>', shared_xml, re.DOTALL)
         ss_list = []
-        for item in ss_items:
+        for item in ss_raw:
             m = re.search(r'<t[^>]*>(.*?)</t>', item, re.DOTALL)
             ss_list.append(m.group(1) if m else '')
 
@@ -82,43 +86,81 @@ def generar_excel():
             ss_list.append(safe)
             return len(ss_list) - 1
 
+        # Pre-read original styles for all cells we'll touch
+        # This ensures clear_cell_preserve_style has the right style BEFORE any changes
+        original_b_styles = {}
+        original_i_styles = {}
+        for row in REPAIR_ROWS:
+            original_b_styles[row] = get_cell_style(sheet_xml, f'B{row}')
+        for row in PARTS_ROWS:
+            original_b_styles[row] = get_cell_style(sheet_xml, f'B{row}')
+            original_i_styles[row] = get_cell_style(sheet_xml, f'I{row}')
+
         now = datetime.now()
         pat = (data.get('patente') or '').upper().strip()
         fecha = f" Fecha {now.day} de {MESES[now.month-1]} {now.year}"
 
-        # Header
-        sheet_xml = replace_cell(sheet_xml, 'B7',  make_text_cell('B7',  S_HEAD, ss(f'Presupuesto {pat}')))
-        sheet_xml = replace_cell(sheet_xml, 'D7',  make_text_cell('D7',  S_HEAD, ss(fecha)))
-        sheet_xml = replace_cell(sheet_xml, 'C13', make_text_cell('C13', S_DATA, ss(data.get('marca') or '')))
-        sheet_xml = replace_cell(sheet_xml, 'F13', make_text_cell('F13', S_DATA, ss(data.get('modelo') or '')))
-        sheet_xml = replace_cell(sheet_xml, 'C14', make_text_cell('C14', S_DATA, ss(pat)))
+        # Header styles (read once from original)
+        s_b7  = get_cell_style(sheet_xml, 'B7')
+        s_d7  = get_cell_style(sheet_xml, 'D7')
+        s_c13 = get_cell_style(sheet_xml, 'C13')
+        s_f13 = get_cell_style(sheet_xml, 'F13')
+        s_i13 = get_cell_style(sheet_xml, 'I13')
+        s_c14 = get_cell_style(sheet_xml, 'C14')
+        s_f14 = get_cell_style(sheet_xml, 'F14')
+        s_i14 = get_cell_style(sheet_xml, 'I14')
+        s_b113 = get_cell_style(sheet_xml, 'B113')
+
+        # Fill header
+        sheet_xml = set_cell_value(sheet_xml, 'B7',  make_text_cell('B7',  s_b7,  ss(f'Presupuesto {pat}')))
+        sheet_xml = set_cell_value(sheet_xml, 'D7',  make_text_cell('D7',  s_d7,  ss(fecha)))
+        sheet_xml = set_cell_value(sheet_xml, 'C13', make_text_cell('C13', s_c13, ss(data.get('marca') or '')))
+        sheet_xml = set_cell_value(sheet_xml, 'F13', make_text_cell('F13', s_f13, ss(data.get('modelo') or '')))
+        sheet_xml = set_cell_value(sheet_xml, 'C14', make_text_cell('C14', s_c14, ss(pat)))
 
         if data.get('anio'):
-            try: sheet_xml = replace_cell(sheet_xml, 'I13', make_num_cell('I13', S_NUM, int(data['anio'])))
+            try: sheet_xml = set_cell_value(sheet_xml, 'I13', make_num_cell('I13', s_i13, int(data['anio'])))
             except: pass
         if data.get('km'):
-            try: sheet_xml = replace_cell(sheet_xml, 'F14', make_num_cell('F14', S_NUM2, int(data['km'])))
+            try: sheet_xml = set_cell_value(sheet_xml, 'F14', make_num_cell('F14', s_f14, int(data['km'])))
             except: pass
         if data.get('combustible'):
-            try: sheet_xml = replace_cell(sheet_xml, 'I14', make_num_cell('I14', S_FRAC, int(data['combustible']) / 4))
+            try: sheet_xml = set_cell_value(sheet_xml, 'I14', make_num_cell('I14', s_i14, int(data['combustible']) / 4))
             except: pass
 
-        # Clear repair rows (skip headers)
+        # Clear all repair and parts cells (preserving original styles)
         for row in REPAIR_ROWS:
-            sheet_xml = clear_cell(sheet_xml, f'B{row}', S_TEXT)
+            style = original_b_styles[row]
+            empty = f'<c r="B{row}" s="{style}"/>'
+            p1 = rf'<c r="B{row}"(?:\s[^>]*)?\s*/>'
+            p2 = rf'<c r="B{row}"[^>]*>.*?</c>'
+            result = re.sub(p1, empty, sheet_xml)
+            sheet_xml = result if result != sheet_xml else re.sub(p2, empty, sheet_xml, flags=re.DOTALL)
 
-        # Clear parts rows
         for row in PARTS_ROWS:
-            sheet_xml = clear_cell(sheet_xml, f'B{row}', S_TEXT)
-            sheet_xml = clear_cell(sheet_xml, f'I{row}', S_PRICE)
+            # Clear B
+            b_style = original_b_styles[row]
+            b_empty = f'<c r="B{row}" s="{b_style}"/>'
+            p1b = rf'<c r="B{row}"(?:\s[^>]*)?\s*/>'
+            p2b = rf'<c r="B{row}"[^>]*>.*?</c>'
+            result = re.sub(p1b, b_empty, sheet_xml)
+            sheet_xml = result if result != sheet_xml else re.sub(p2b, b_empty, sheet_xml, flags=re.DOTALL)
+            # Clear I — preserve original style (17 for all I57-I106)
+            i_style = original_i_styles[row]
+            i_empty = f'<c r="I{row}" s="{i_style}"/>'
+            p1i = rf'<c r="I{row}"(?:\s[^>]*)?\s*/>'
+            p2i = rf'<c r="I{row}"[^>]*>.*?</c>'
+            result = re.sub(p1i, i_empty, sheet_xml)
+            sheet_xml = result if result != sheet_xml else re.sub(p2i, i_empty, sheet_xml, flags=re.DOTALL)
 
-        # Fill repairs across all sections
+        # Fill repairs
         trabajos = data.get('trabajos') or []
         for i, t in enumerate(trabajos):
             if i < len(REPAIR_ROWS) and t:
                 row = REPAIR_ROWS[i]
-                sheet_xml = replace_cell(sheet_xml, f'B{row}',
-                    make_text_cell(f'B{row}', S_TEXT, ss(t)))
+                style = original_b_styles[row]
+                sheet_xml = set_cell_value(sheet_xml, f'B{row}',
+                    make_text_cell(f'B{row}', style, ss(t)))
 
         # Fill parts
         idx_gama = ss('GAMA')
@@ -126,15 +168,17 @@ def generar_excel():
         for i, r in enumerate(repuestos):
             if i < len(PARTS_ROWS) and r:
                 row = PARTS_ROWS[i]
-                sheet_xml = replace_cell(sheet_xml, f'B{row}',
-                    make_text_cell(f'B{row}', S_TEXT, ss(r)))
-                sheet_xml = replace_cell(sheet_xml, f'I{row}',
-                    make_text_cell(f'I{row}', '17', idx_gama))
+                b_style = original_b_styles[row]
+                i_style = original_i_styles[row]
+                sheet_xml = set_cell_value(sheet_xml, f'B{row}',
+                    make_text_cell(f'B{row}', b_style, ss(r)))
+                sheet_xml = set_cell_value(sheet_xml, f'I{row}',
+                    make_text_cell(f'I{row}', i_style, idx_gama))
 
         # Observations
         obs = data.get('observaciones') or ''
-        sheet_xml = replace_cell(sheet_xml, 'B113',
-            make_text_cell('B113', S_TEXT2, ss(obs)))
+        sheet_xml = set_cell_value(sheet_xml, 'B113',
+            make_text_cell('B113', s_b113, ss(obs)))
 
         # Rebuild shared strings
         new_ss = ''.join(
@@ -146,7 +190,7 @@ def generar_excel():
             f'{new_ss}</sst>'
         )
 
-        # Write xlsx preserving ALL original files (image, styles, formulas)
+        # Write xlsx preserving ALL original files
         buf = BytesIO()
         with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
             for name, fbytes in all_files.items():
