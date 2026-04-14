@@ -129,7 +129,7 @@ def generar_excel():
                 sheet_xml = replace_cell(sheet_xml, f'B{row}',
                     make_text_cell(f'B{row}', S_TEXT, ss(r)))
                 sheet_xml = replace_cell(sheet_xml, f'I{row}',
-                    make_text_cell(f'I{row}', S_PRICE, idx_gama))
+                    make_text_cell(f'I{row}', '17', idx_gama))
 
         # Observations
         obs = data.get('observaciones') or ''
